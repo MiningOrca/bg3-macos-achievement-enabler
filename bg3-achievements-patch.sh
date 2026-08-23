@@ -1,15 +1,38 @@
 #!/bin/bash
 set -euo pipefail
 
-APP="$HOME/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app"
-BIN="$APP/Contents/MacOS/Baldur's Gate 3"
-STATE_DIR="$HOME/Library/Application Support/BG3AchievementPatch"
-BACKUP="$STATE_DIR/Baldur's Gate 3.original"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# These offsets/bytes are for the exact BG3 macOS build reverse-engineered in this chat.
-OFF_UNLOCK=$((0x13dd8af8))
-OFF_COUNTER=$((0x13dd8efc))
-OFF_OSIRIS_UNLOCK=$((0x14b07e08))
+STEAM_APP="$HOME/Library/Application Support/Steam/steamapps/common/Baldurs Gate 3/Baldur's Gate 3.app"
+STEAM_BIN="$STEAM_APP/Contents/MacOS/Baldur's Gate 3"
+
+GOG_APP="/Applications/Baldur's Gate 3.app"
+GOG_BIN="$GOG_APP/Contents/MacOS/Baldur's Gate 3 GOG"
+
+if [[ -f "$STEAM_BIN" ]]; then
+  PLATFORM="Steam"
+  APP="$STEAM_APP"
+  BIN="$STEAM_BIN"
+  BACKUP="$SCRIPT_DIR/Baldur's Gate 3.original"
+
+  OFF_UNLOCK=$((0x13dd8af8))
+  OFF_COUNTER=$((0x13dd8efc))
+  OFF_OSIRIS_UNLOCK=$((0x14b07e08))
+
+elif [[ -f "$GOG_BIN" ]]; then
+  PLATFORM="GOG"
+  APP="$GOG_APP"
+  BIN="$GOG_BIN"
+  BACKUP="$SCRIPT_DIR/Baldur's Gate 3 GOG.original"
+
+  OFF_UNLOCK=$((0x13dbca18))
+  OFF_COUNTER=$((0x13dbce1c))
+  OFF_OSIRIS_UNLOCK=$((0x14aebd28))
+
+else
+  echo "ERROR: Supported BG3 installation not found." >&2
+  exit 1
+fi
 
 STOCK_UNLOCK="7c000036"      # tbz w28, #0, 0x104818b04
 PATCH_UNLOCK="03000014"      # b   0x104818b04
@@ -28,7 +51,7 @@ Usage:
 
 Commands:
   status   Show whether the achievement patch is ON/OFF.
-  on       Enable Steam achievements with custom mods.
+  on       Enable achievements with custom mods.
   off      Disable the patch and restore the original three instructions.
   restore  Restore the full original executable from the first-run backup.
 USAGE
@@ -45,7 +68,8 @@ require_game() {
 }
 
 ensure_not_running() {
-  if pgrep -x "Baldur's Gate 3" >/dev/null 2>&1; then
+  if pgrep -x "Baldur's Gate 3" >/dev/null 2>&1 || \
+     pgrep -x "Baldur's Gate 3 GOG" >/dev/null 2>&1; then
     die "Baldur's Gate 3 is running. Quit the game first."
   fi
 }
@@ -100,7 +124,6 @@ state() {
 
 make_backup() {
   if [[ ! -f "$BACKUP" ]]; then
-    mkdir -p "$STATE_DIR"
     echo "Creating original executable backup..."
     cp -p "$BIN" "$BACKUP"
     /usr/bin/shasum -a 256 "$BACKUP" > "$BACKUP.sha256"
@@ -117,15 +140,38 @@ resign() {
     -print \
     -delete
 
+  if [[ "$PLATFORM" == "GOG" ]]; then
+    echo "Re-signing GOG game executable ad-hoc while preserving signing metadata..."
+    /usr/bin/codesign \
+      --force \
+      --sign - \
+      --preserve-metadata=identifier,entitlements,flags \
+      "$BIN" || return 1
+
+    echo "Verifying GOG game executable signature..."
+    /usr/bin/codesign \
+      --verify \
+      --strict \
+      --verbose=2 \
+      "$BIN" || return 1
+
+    return 0
+  fi
+
   echo "Re-signing BG3 ad-hoc while preserving signing metadata..."
   /usr/bin/codesign \
     --force \
     --sign - \
     --preserve-metadata=identifier,entitlements,flags \
-    "$APP"
+    "$APP" || return 1
 
   echo "Verifying signature..."
-  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+  /usr/bin/codesign \
+    --verify \
+    --deep \
+    --strict \
+    --verbose=2 \
+    "$APP" || return 1
 }
 
 show_status() {
@@ -136,6 +182,7 @@ show_status() {
   b="$(read4 "$OFF_COUNTER")"
   c="$(read4 "$OFF_OSIRIS_UNLOCK")"
 
+  echo "Platform: $PLATFORM"
   echo "BG3: $BIN"
   echo "UnlockAchievement bytes:                 $a"
   echo "IncreaseAchievementCounter bytes:        $b"
@@ -239,6 +286,19 @@ restore_original() {
 
   echo "Restoring full original executable..."
   cp -p "$BACKUP" "$BIN"
+
+  if [[ "$PLATFORM" == "GOG" ]]; then
+    echo "Verifying restored executable signature..."
+    if /usr/bin/codesign --verify --strict --verbose=2 "$BIN"; then
+      echo "Original executable restored and signature verifies."
+    else
+      echo "Original executable restored, but its signature verification failed." >&2
+      echo "If BG3 does not launch, repair/verify the game installation through GOG Galaxy." >&2
+      exit 1
+    fi
+
+    return 0
+  fi
 
   echo "Verifying restored executable/app signature..."
   if /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"; then
