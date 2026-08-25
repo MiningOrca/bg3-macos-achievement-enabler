@@ -141,6 +141,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
