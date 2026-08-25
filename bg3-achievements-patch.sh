@@ -131,6 +131,53 @@ make_backup() {
   fi
 }
 
+sign_bg3_app() {
+  local output nested attempt
+
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if output="$(
+      /usr/bin/codesign \
+        --force \
+        --sign - \
+        --preserve-metadata=identifier,entitlements,flags \
+        "$APP" \
+        2>&1
+    )"; then
+      [[ -z "$output" ]] || printf '%s\n' "$output"
+      return 0
+    fi
+
+    printf '%s\n' "$output" >&2
+
+    [[ "$output" == *"code object is not signed at all"* ]] || return 1
+
+    nested="$(
+      printf '%s\n' "$output" |
+        /usr/bin/sed -n 's/^In subcomponent: //p' |
+        /usr/bin/tail -n 1
+    )"
+
+    [[ -n "$nested" ]] || return 1
+    case "$nested" in
+      "$APP"/*) ;;
+      *)
+        echo "Refusing to sign code outside the BG3 app: $nested" >&2
+        return 1
+        ;;
+    esac
+    [[ -e "$nested" ]] || return 1
+
+    echo "Signing unsigned nested code: ${nested#"$APP/"}"
+    /usr/bin/codesign \
+      --force \
+      --sign - \
+      "$nested"
+  done
+
+  echo "Too many unsigned nested code objects; aborting." >&2
+  return 1
+}
+
 resign() {
   echo "Removing runtime logs from Contents/MacOS..."
   find "$APP/Contents/MacOS" \
@@ -146,32 +193,14 @@ resign() {
       --force \
       --sign - \
       --preserve-metadata=identifier,entitlements,flags \
-      "$BIN" || return 1
-
-    echo "Verifying GOG game executable signature..."
-    /usr/bin/codesign \
-      --verify \
-      --strict \
-      --verbose=2 \
-      "$BIN" || return 1
-
-    return 0
+      "$BIN"
   fi
 
   echo "Re-signing BG3 ad-hoc while preserving signing metadata..."
-  /usr/bin/codesign \
-    --force \
-    --sign - \
-    --preserve-metadata=identifier,entitlements,flags \
-    "$APP" || return 1
+  sign_bg3_app
 
   echo "Verifying signature..."
-  /usr/bin/codesign \
-    --verify \
-    --deep \
-    --strict \
-    --verbose=2 \
-    "$APP" || return 1
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
 }
 
 show_status() {
@@ -241,6 +270,16 @@ enable_patch() {
   if ! resign; then
     echo "Signing failed; restoring original executable." >&2
     cp -p "$BACKUP" "$BIN"
+
+    if [[ "$PLATFORM" == "GOG" ]]; then
+      /usr/bin/codesign \
+        --force \
+        --sign - \
+        --preserve-metadata=identifier,entitlements,flags \
+        "$APP" \
+        >/dev/null 2>&1 || true
+    fi
+
     exit 1
   fi
 
@@ -288,16 +327,12 @@ restore_original() {
   cp -p "$BACKUP" "$BIN"
 
   if [[ "$PLATFORM" == "GOG" ]]; then
-    echo "Verifying restored executable signature..."
-    if /usr/bin/codesign --verify --strict --verbose=2 "$BIN"; then
-      echo "Original executable restored and signature verifies."
-    else
-      echo "Original executable restored, but its signature verification failed." >&2
-      echo "If BG3 does not launch, repair/verify the game installation through GOG Galaxy." >&2
-      exit 1
-    fi
-
-    return 0
+    echo "Re-signing BG3 ad-hoc while preserving signing metadata..."
+    /usr/bin/codesign \
+      --force \
+      --sign - \
+      --preserve-metadata=identifier,entitlements,flags \
+      "$APP"
   fi
 
   echo "Verifying restored executable/app signature..."
@@ -305,7 +340,13 @@ restore_original() {
     echo "Original executable restored and signature verifies."
   else
     echo "Original executable restored, but bundle verification failed." >&2
-    echo "If BG3 does not launch, use Steam -> Properties -> Installed Files -> Verify integrity." >&2
+
+    if [[ "$PLATFORM" == "Steam" ]]; then
+      echo "If BG3 does not launch, use Steam -> Properties -> Installed Files -> Verify integrity." >&2
+    else
+      echo "If BG3 does not launch, repair/verify the game installation through GOG Galaxy." >&2
+    fi
+
     exit 1
   fi
 }
