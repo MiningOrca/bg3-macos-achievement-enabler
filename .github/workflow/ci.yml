@@ -1,0 +1,161 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout BG3
+        uses: actions/checkout@v7
+        with:
+          path: app
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout private Mining Orca
+        uses: actions/checkout@v7
+        with:
+          repository: MiningOrca/mining-orca-banner
+          token: ${{ secrets.MINING_ORCA_TOKEN }}
+          path: orca
+          persist-credentials: false
+
+      - name: Build Mining Orca
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x orca/build.sh orca/assemble.sh
+          ./orca/build.sh
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # A rerun for the same commit must reuse its existing version.
+          existing="$(
+            git -C app tag --points-at "$GITHUB_SHA" |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+              head -n 1 || true
+          )"
+
+          if [[ -n "$existing" ]]; then
+            next="$existing"
+            kind="existing"
+          else
+            latest="$(
+              git -C app tag --list 'v*' --sort=-v:refname |
+                grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+                head -n 1 || true
+            )"
+
+            if [[ -z "$latest" ]]; then
+              next="v1.0.0"
+              kind="initial"
+            else
+              version="${latest#v}"
+              IFS='.' read -r major minor patch <<< "$version"
+
+              # Ask GitHub whether this main-branch commit was introduced by
+              # a merged pull request. This also works for squash merges.
+              merged_prs="$(
+                gh api \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+                  --jq '[.[] | select(.merged_at != null and .base.ref == "main")] | length'
+              )"
+
+              if (( merged_prs > 0 )); then
+                # Merge PR: bump the middle number and reset patch.
+                next="v${major}.$((minor + 1)).0"
+                kind="merge"
+              else
+                # Direct push to main: bump only the smallest number.
+                next="v${major}.${minor}.$((patch + 1))"
+                kind="push"
+              fi
+            fi
+          fi
+
+          printf 'Release kind: %s\n' "$kind"
+          printf 'Release version: %s\n' "$next"
+
+          printf 'kind=%s\n' "$kind" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$next" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble standalone BG3 patcher
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          ./orca/assemble.sh \
+            ./app/bg3-achievements-patch.sh \
+            "PATCHING BG3..." \
+            ./release/bg3-achievements-patch.sh
+
+      - name: Validate release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s ./release/bg3-achievements-patch.sh
+          bash -n ./release/bg3-achievements-patch.sh
+
+          # Release artifact must contain Orca.
+          grep -q 'BEGIN EMBEDDED MINING ORCA' \
+            ./release/bg3-achievements-patch.sh
+
+          # Public source must remain clean.
+          ! grep -q 'BEGIN EMBEDDED MINING ORCA' \
+            ./app/bg3-achievements-patch.sh
+
+      - name: Create SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd release
+          shasum -a 256 bg3-achievements-patch.sh \
+            > bg3-achievements-patch.sh.sha256
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Makes workflow reruns idempotent.
+            gh release upload "$TAG" \
+              ./release/bg3-achievements-patch.sh \
+              ./release/bg3-achievements-patch.sh.sha256 \
+              --clobber
+          else
+            gh release create "$TAG" \
+              ./release/bg3-achievements-patch.sh \
+              ./release/bg3-achievements-patch.sh.sha256 \
+              --target "$GITHUB_SHA" \
+              --generate-notes \
+              --title "$TAG"
+          fi
