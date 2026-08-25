@@ -14,6 +14,12 @@ No Script Extender or NativeModLoader required.
 - A supported game build (4.1.1.7398727)
 
 The patch is build-specific. Before modifying the executable, the script verifies the expected instruction bytes at each patch location and refuses to continue if they do not match.
+
+
+## Download
+
+Download the latest `bg3-achievements-patch.sh` from the repository's **Releases** page.
+
 ## Usage
 
 Download the script and make it executable:
