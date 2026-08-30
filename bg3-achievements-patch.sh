@@ -159,6 +159,28 @@ make_backup() {
   fi
 }
 
+report_unsealed_bundle_root() {
+  local entry found=0
+
+  ui_error ""
+  ui_error "Unexpected content found in the app bundle root:"
+
+  while IFS= read -r -d '' entry; do
+    [[ "$entry" == "$APP/Contents" ]] && continue
+    ui_error "  ${entry#"$APP/"}"
+    found=1
+  done < <(/usr/bin/find "$APP" -mindepth 1 -maxdepth 1 -print0)
+
+  if [[ "$found" -eq 0 ]]; then
+    ui_error "  (codesign reported an unsealed bundle root, but no extra root entries were found)"
+  fi
+
+  ui_error ""
+  ui_error "The app bundle root should contain only Contents."
+  ui_error "Move or remove the entries above, then run the patch again."
+  ui_error "Do not move them back afterward; changing the signed bundle will invalidate its signature."
+}
+
 # codesign reports one bad nested code object at a time. Repair only the
 # reported unsigned object, then retry the outer app signature.
 sign_bg3_app() {
@@ -178,6 +200,12 @@ sign_bg3_app() {
     fi
 
     [[ -z "$output" ]] || ui_error "$output"
+
+    if [[ "$output" == *"unsealed contents present in the bundle root"* ]]; then
+      report_unsealed_bundle_root
+      return 1
+    fi
+
     [[ "$output" == *"code object is not signed at all"* ]] || return 1
 
     nested="$(
