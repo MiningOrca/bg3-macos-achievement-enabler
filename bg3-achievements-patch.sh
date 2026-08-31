@@ -242,32 +242,48 @@ sign_bg3_app() {
 }
 
 resign() {
-  ui_print "Removing runtime logs from Contents/MacOS..."
-  /usr/bin/find "$APP/Contents/MacOS" \
-    -maxdepth 1 \
-    -type f \
-    -name '*.log' \
-    -delete
-
   if [[ "$PLATFORM" == "GOG" ]]; then
     ui_print "Re-signing GOG game executable ad-hoc while preserving signing metadata..."
+
     run_logged /usr/bin/codesign \
       --force \
       --sign - \
       --preserve-metadata=identifier,entitlements,flags \
       "$BIN" || return 1
+
+    ui_print "Verifying GOG executable signature..."
+
+    run_logged /usr/bin/codesign \
+      --verify \
+      --strict \
+      --verbose=2 \
+      "$BIN" || return 1
+
+    return 0
   fi
 
+  ui_print "Removing runtime logs from Contents/MacOS..."
+
+  run_logged /usr/bin/find "$APP/Contents/MacOS" \
+    -maxdepth 1 \
+    -type f \
+    -name '*.log' \
+    -delete || return 1
+
   ui_print "Re-signing BG3 ad-hoc while preserving signing metadata..."
+
   sign_bg3_app || return 1
 
   ui_print "Verifying signature..."
+
   run_logged /usr/bin/codesign \
     --verify \
     --deep \
     --strict \
     --verbose=2 \
-    "$APP"
+    "$APP" || return 1
+
+  return 0
 }
 
 show_status() {
